@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Rofi focus sessions and a shared Waybar clock/countdown."""
+from contextlib import contextmanager
+from datetime import datetime
+import fcntl
+import ctypes
+import json
+import math
+import os
+import select
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+DURATIONS = {"20 mins": 20, "30 mins": 30, "45 mins": 45,
+             "1 hr": 60, "1 hr 30 mins": 90, "2 hr": 120}
+ROOT = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/focus-mode-{os.getuid()}")) / "focus-mode"
+STATE = ROOT / "session.json"
+QUIET = "focus-timer"
+
+THEME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rofi/system-tools.rasi"
+
+
+def command(*args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=5).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+@contextmanager
+def locked():
+    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ROOT.chmod(0o700)
+    with (ROOT / "lock").open("a") as lock:
+        os.fchmod(lock.fileno(), 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def read_session():
+    try:
+        return json.loads(STATE.read_text())
+    except FileNotFoundError:
+        return None
+
+
+def finish(message):
+    # Called under the lock: workers and Waybar pollers announce only once.
+    command("makoctl", "mode", "-r", QUIET)
+    STATE.unlink(missing_ok=True)
+    command("notify-send", "Focus Mode", message)
+
+
+def status():
+    with locked():
+        session = read_session()
+        if session and session["end"] <= time.time():
+            finish("Session complete. Time for a break.")
+            session = None
+    if not session:
+        return {"text": datetime.now().strftime("%a %d %b  %H:%M"),
+                "class": "clock", "tooltip": "Click to start a focus session"}
+    remaining = max(0, math.ceil(session["end"] - time.time()))
+    hours, seconds = divmod(remaining, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    countdown = f"{hours}:{minutes:02}:{seconds:02}" if hours else f"{minutes:02}:{seconds:02}"
+    quiet = "Notifications silenced" if session["quiet"] else "Notification silencing unavailable"
+    return {"text": f"Focus  {countdown}", "class": "focus",
+            "tooltip": f"{session['minutes']} minute session · {quiet}\nClick to change duration · Right-click to stop"}
+
+
+def start(minutes):
+    if minutes not in DURATIONS.values():
+        raise ValueError("Choose 20, 30, 45, 60, 90 or 120 minutes")
+    token = os.urandom(16).hex()
+    with locked():
+        quiet = command("makoctl", "mode", "-a", QUIET)
+        temporary = STATE.with_suffix(".tmp")
+        try:
+            temporary.write_text(json.dumps({"end": time.time() + minutes * 60,
+                                             "minutes": minutes, "quiet": quiet, "token": token}))
+            temporary.chmod(0o600)
+            os.replace(temporary, STATE)
+            # A terminal invocation must finish even without a Waybar poller.
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", token],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        except OSError:
+            command("makoctl", "mode", "-r", QUIET)
+            temporary.unlink(missing_ok=True)
+            STATE.unlink(missing_ok=True)
+            raise
+
+
+def worker(token):
+    """One bounded worker per session; replaced/stopped sessions exit within a second."""
+    deadline = None
+    while True:
+        with locked():
+            session = read_session()
+            if not session or session.get("token") != token:
+                return
+            remaining = session["end"] - time.time()
+            if deadline is None:
+                # Bound lifetime even when the wall clock moves backwards.
+                deadline = time.monotonic() + min(max(remaining, 0), session["minutes"] * 60)
+            remaining = min(remaining, deadline - time.monotonic())
+            if remaining <= 0:
+                finish("Session complete. Time for a break.")
+                return
+        time.sleep(min(1, remaining))
+
+
+def watch():
+    """Stream updates; kernel file events wake an otherwise sleeping clock."""
+    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.inotify_init1.argtypes = [ctypes.c_int]
+    libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+    fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "Could not initialize focus watcher")
+    try:
+        # Session writes are atomic renames; deletion ends the session.
+        if libc.inotify_add_watch(fd, os.fsencode(ROOT), 0x80 | 0x200) < 0:
+            raise OSError(ctypes.get_errno(), "Could not watch focus state")
+        previous = None
+        while True:
+            value = status()
+            if value != previous:
+                print(json.dumps(value), flush=True)
+                previous = value
+            now = time.time()
+            delay = 1 if value["class"] == "focus" else 60 - now % 60
+            if select.select([fd], [], [], delay)[0]:
+                while True:
+                    try:
+                        os.read(fd, 65536)
+                    except BlockingIOError:
+                        break
+    finally:
+        os.close(fd)
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else "menu"
+    if action in ("--help", "-h"):
+        print("""Usage: focus-mode [20|30|45|60|90|120|stop|--status|--watch]
+Without arguments opens the duration menu. Numeric starts run a detached,
+bounded completion worker; Waybar is optional. --status returns Waybar JSON;
+--watch streams updates. stop also removes stale notification quiet mode.
+Notification silencing requires mako and a [mode=focus-timer] rule with
+invisible=1 in mako's configuration. Without mako the timer still works.
+""")
+    elif action == "--worker" and len(sys.argv) == 3:
+        worker(sys.argv[2])
+    elif action == "--status":
+        print(json.dumps(status()), flush=True)
+    elif action == "--watch":
+        watch()
+    elif action == "stop":
+        with locked():
+            if read_session():
+                finish("Session stopped.")
+            else:
+                # Explicit stop also recovers quiet mode after a crashed session.
+                command("makoctl", "mode", "-r", QUIET)
+    elif action.isdigit():
+        start(int(action))
+    elif action == "menu":
+        choices = list(DURATIONS)
+        with locked():
+            if read_session():
+                choices.append("Stop focus session")
+        menu = subprocess.run(
+            ["rofi", "-dmenu", "-no-config", "-theme", str(THEME), "-i", "-no-custom", "-p", "Focus duration",
+             "-kb-row-down", "Down,Control+n,j", "-kb-row-up", "Up,Control+p,k"],
+            input="\n".join(choices), capture_output=True, text=True,
+        )
+        if menu.returncode != 0:
+            return
+        choice = menu.stdout.strip()
+        if choice == "Stop focus session":
+            with locked():
+                if read_session():
+                    finish("Session stopped.")
+        elif choice in DURATIONS:
+            start(DURATIONS[choice])
+    else:
+        raise ValueError("Usage: focus-mode [20|30|45|60|90|120|stop|--status|--watch]")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError) as error:
+        print(f"Focus Mode: {error}", file=sys.stderr)
+        sys.exit(1)

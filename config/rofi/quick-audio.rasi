@@ -1,0 +1,41 @@
+* {
+    font: "monospace 12";
+    background-color: transparent;
+    text-color: #ffffff;
+    margin: 0;
+    padding: 0;
+    spacing: 0;
+}
+window {
+    location: center;
+    width: 160px;
+    background-color: #000000;
+    border: 1px;
+    border-color: #ffffff;
+    border-radius: 14px;
+}
+mainbox {
+    children: [ inputbar ];
+}
+inputbar {
+    padding: 6px 10px;
+    spacing: 20px;
+    children: [ entry ];
+}
+prompt {
+    vertical-align: 0.5;
+}
+entry {
+    font: "monospace 16";
+    horizontal-align: 0.5;
+    placeholder: "";
+    placeholder-color: #ffffff;
+    vertical-align: 0.5;
+}
+message {
+    border: 1px 0 0;
+    border-color: #ffffff;
+}
+textbox {
+    padding: 12px 20px;
+}

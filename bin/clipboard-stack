@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""A ten-item, move-to-front clipboard history for Wayland."""
+from contextlib import contextmanager
+import hashlib
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+
+DB = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "clipboard-stack/history.sqlite3"
+THEME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rofi/system-tools.rasi"
+
+
+@contextmanager
+def database():
+    DB.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Only this tool's private directory/file, never the shared cache root.
+    DB.parent.chmod(0o700)
+    fd = os.open(DB, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    connection = sqlite3.connect(DB, timeout=10)
+    try:
+        connection.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, digest TEXT UNIQUE, kind TEXT, content BLOB)")
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def store(content, kind):
+    if not content or len(content) > 5 * 1024 * 1024:
+        return
+    digest = hashlib.sha256(kind.encode() + b"\0" + content).hexdigest()
+    with database() as db:
+        db.execute("DELETE FROM items WHERE digest = ?", (digest,))
+        db.execute("INSERT INTO items (digest, kind, content) VALUES (?, ?, ?)", (digest, kind, content))
+        db.execute("DELETE FROM items WHERE id NOT IN (SELECT id FROM items ORDER BY id DESC LIMIT 10)")
+
+
+def entries():
+    with database() as db:
+        return db.execute("SELECT id, kind, content FROM items ORDER BY id DESC LIMIT 10").fetchall()
+
+
+def preview(kind, content):
+    if kind == "image":
+        return f"[Image · {len(content) // 1024} KB]"
+    text = content.decode("utf-8", errors="replace")
+    # Keep entries on one line without changing their actual clipboard bytes.
+    text = text.replace("\r\n", "\n").replace("\n", " ↵ ").replace("\t", " ⇥ ")
+    return "".join(c if c.isprintable() else " " for c in text)[:180] or "[Whitespace]"
+
+
+def menu():
+    items = entries()
+    if not items:
+        subprocess.run(["notify-send", "Clipboard", "History is empty. Copy something first."], check=False)
+        return
+    labels = [f"{i + 1}. {preview(kind, content)}" for i, (_, kind, content) in enumerate(items)]
+    result = subprocess.run(
+        ["rofi", "-dmenu", "-no-config", "-theme", str(THEME), "-i", "-no-custom", "-no-sort", "-format", "i",
+         "-p", "Clipboard · last 10", "-kb-row-down", "Down,Control+n,j",
+         "-kb-row-up", "Up,Control+p,k"],
+        input="\n".join(labels), capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return
+    index = int(result.stdout.strip())
+    if not 0 <= index < len(items):
+        return
+    _, kind, content = items[index]
+    args = ["wl-copy"]
+    if kind == "text":
+        args += ["--type", "text/plain;charset=utf-8"]
+    subprocess.run(args, input=content, check=True)
+    store(content, kind)
+
+
+def main():
+    os.umask(0o077)
+    args = sys.argv[1:]
+    if args in (["--help"], ["-h"]):
+        print("Usage: clipboard-stack [store text|image]\nRun clipboard-watch from the same bin directory to collect history.")
+        return
+    if len(args) == 2 and args[0] == "store" and args[1] in ("text", "image"):
+        if os.environ.get("CLIPBOARD_STATE") in ("sensitive", "nil", "clear"):
+            return
+        store(sys.stdin.buffer.read(5 * 1024 * 1024 + 1), args[1])
+    elif not args:
+        menu()
+    else:
+        raise ValueError("Usage: clipboard-stack [store text|image]")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, sqlite3.Error, subprocess.CalledProcessError) as error:
+        print(f"Clipboard: {error}", file=sys.stderr)
+        sys.exit(1)

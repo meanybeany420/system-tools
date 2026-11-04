@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Check toolkit dependencies without changing the desktop or installing packages."""
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+
+COMMANDS = ('bash', 'python3', 'rofi', 'wpctl', 'brightnessctl', 'notify-send',
+            'wl-copy', 'wl-paste', 'flock', 'readlink', 'hyprctl', 'makoctl')
+ASSETS = ('rofi/quick-audio.rasi', 'rofi/system-tools.rasi',
+          'hypr/system-tools-monitors.lua')
+
+
+def collect_checks(session=False):
+    checks = []
+    for name in COMMANDS:
+        executable = shutil.which(name)
+        checks.append({'name': name, 'status': 'PASS' if executable else 'FAIL',
+                       'detail': executable or 'Required command is missing; run the installer.'})
+    config = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
+    for relative in ASSETS:
+        path = config / relative
+        checks.append({'name': relative, 'status': 'PASS' if path.is_file() else 'FAIL',
+                       'detail': str(path)})
+    if session:
+        probes = (('Hyprland session', ['hyprctl', '-j', 'monitors', 'all']),
+                  ('Default audio output', ['wpctl', 'get-volume', '@DEFAULT_AUDIO_SINK@']))
+        for name, command in probes:
+            try:
+                result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+                passed = result.returncode == 0
+                detail = 'Read-only session query succeeded.' if passed else 'Unavailable in this session; check the running desktop/audio stack.'
+            except (OSError, subprocess.TimeoutExpired):
+                passed = False
+                detail = 'Read-only session query could not run.'
+            checks.append({'name': name, 'status': 'PASS' if passed else 'FAIL', 'detail': detail})
+    return checks
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--session', action='store_true', help='also query the running Hyprland session and default audio output (read-only)')
+    parser.add_argument('--json', action='store_true', help='print structured results')
+    args = parser.parse_args()
+    checks = collect_checks(session=args.session)
+    if args.json:
+        print(json.dumps(checks, indent=2))
+    else:
+        for check in checks:
+            print(f"{check['status']:4}  {check['name']}: {check['detail']}")
+        print('\nHardware support and display layout settings still need checking on each machine.')
+    return int(any(check['status'] == 'FAIL' for check in checks))
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

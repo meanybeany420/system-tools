@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Apply saved display choices and verify what the compositor actually did."""
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+MODES = {
+    "Automatic": "auto",
+    "Laptop only": "laptop",
+    "External monitor only": "external",
+    "Extend — external on right": "right",
+    "Extend — external on left": "left",
+    "Mirror": "mirror",
+}
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+PATH = CONFIG / "hypr/monitor-mode"
+SETTINGS = CONFIG / "hypr/system-tools-displays.json"
+MODULE = CONFIG / "hypr/system-tools-monitors.lua"
+THEME = CONFIG / "rofi/system-tools.rasi"
+
+
+def resolve_outputs(snapshot):
+    """Select exactly one primary and at most one physical external output."""
+    settings = json.loads(SETTINGS.read_text()) if SETTINGS.exists() else {}
+    allowed = {"laptop", "external", "laptop_scale", "external_scale"}
+    if not isinstance(settings, dict) or settings.keys() - allowed:
+        raise ValueError(f"Unknown display settings; see {SETTINGS} and --help")
+    by_name = {m["name"]: m for m in snapshot}
+    if not by_name or len(by_name) != len(snapshot):
+        raise ValueError("No monitors or duplicate monitor names")
+    for name, monitor in by_name.items():
+        if not re.fullmatch(r"(?:eDP|LVDS|DSI|DP|HDMI-A|HDMI-B|DVI-D|DVI-I|VGA)-[0-9]+(?:-[0-9]+)*", name):
+            raise ValueError(f"Unsupported non-physical output: {name}")
+        if monitor.get("transform", 0) != 0:
+            raise ValueError("Rotated/flipped outputs are not supported; layout unchanged")
+    internal = [n for n in by_name if n.startswith(("eDP-", "LVDS-", "DSI-"))]
+    laptop = settings.get("laptop")
+    if laptop is None:
+        if len(internal) != 1:
+            raise ValueError(f"Ambiguous primary display; set laptop in {SETTINGS} (see --help)")
+        laptop = internal[0]
+    if not isinstance(laptop, str) or laptop not in by_name:
+        raise ValueError("Configured laptop/primary output is not connected")
+    others = [n for n in by_name if n != laptop]
+    if len(others) > 1:
+        raise ValueError("Only one primary and one external output are supported; disconnect extra outputs")
+    external = settings.get("external", others[0] if others else "")
+    if not isinstance(external, str) or external == laptop or (others and external != others[0]):
+        raise ValueError(f"Ambiguous external output; correct external in {SETTINGS}")
+    if external and not re.fullmatch(r"[A-Za-z0-9-]+", external):
+        raise ValueError("Invalid external connector name")
+    result = {"laptop": laptop, "external": external, "connected": external in by_name}
+    for role in ("laptop", "external"):
+        key = role + "_scale"
+        reported = by_name.get(result[role], {}).get("scale")
+        if not isinstance(reported, (int, float)) or not math.isfinite(reported) or reported <= 0:
+            reported = "auto"
+        scale = settings.get(key, reported)
+        if scale != "auto" and (isinstance(scale, bool) or not isinstance(scale, (int, float))
+                                or not math.isfinite(scale) or not 0.5 <= scale <= 4):
+            raise ValueError(f"{key} must be auto or a number between 0.5 and 4")
+        result[key] = scale
+    return result
+
+
+def hypr(*args):
+    result = subprocess.run(["hyprctl", *args], capture_output=True, text=True, timeout=4)
+    if result.returncode:
+        raise RuntimeError((result.stderr + result.stdout).strip() or "Hyprland command failed")
+    return result.stdout.strip()
+
+
+def monitors():
+    return json.loads(hypr("monitors", "all", "-j"))
+
+
+def notify(message):
+    print(message)
+    try:
+        subprocess.run(["notify-send", "Display mode", message], timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def write_selection(contents):
+    PATH.parent.mkdir(parents=True, exist_ok=True)
+    if contents is None:
+        PATH.unlink(missing_ok=True)
+        return
+    with tempfile.NamedTemporaryFile(dir=PATH.parent, prefix=".monitor-mode-", delete=False) as temporary:
+        temporary.write(contents)
+        name = temporary.name
+    os.replace(name, PATH)
+
+
+def is_mirror(monitor):
+    return monitor.get("mirrorOf") not in (None, "none", "", -1)
+
+
+def layout_matches(mode, snapshot, outputs):
+    active = {m["name"]: m for m in snapshot if not m.get("disabled", False) and m.get("width", 0) > 0 and m.get("height", 0) > 0}
+    if set(active) - {outputs["laptop"], outputs["external"]}:
+        return False
+    a, b = active.get(outputs["laptop"]), active.get(outputs["external"])
+    connected = any(m["name"] == outputs["external"] for m in snapshot)
+    if not connected or mode == "laptop":
+        return bool(a and not is_mirror(a) and not b)
+    if mode in ("auto", "external"):
+        return bool(b and not is_mirror(b) and not a)
+    if not a or not b or is_mirror(a):
+        return False
+    if mode == "mirror":
+        return b.get("mirrorOf") in (a["name"], a["id"], str(a["id"]))
+    if is_mirror(b) or a["y"] != b["y"]:
+        return False
+    # Hyprland uses logical coordinates, after scaling and transformation.
+    left, right = (b, a) if mode == "left" else (a, b)
+    width = left["height"] if left.get("transform", 0) % 2 else left["width"]
+    return math.isclose(left["x"] + width / left["scale"], right["x"], abs_tol=1)
+
+
+def lua_string(value):
+    # Decimal byte escapes are valid Lua, including non-ASCII XDG paths.
+    return '"' + "".join(f"\\{b:03d}" for b in str(value).encode()) + '"'
+
+
+def apply(mode, outputs):
+    options = dict(outputs, mode=mode)
+    values = []
+    for key, value in options.items():
+        encoded = str(value).lower() if isinstance(value, (bool, int, float)) else lua_string(value)
+        values.append(f"{key}={encoded}")
+    code = ('package.loaded["system-tools-monitors"] = package.loaded["system-tools-monitors"] or dofile('
+            + lua_string(MODULE) + '); require("system-tools-monitors").apply({' + ",".join(values) + '})')
+    answer = hypr("eval", code)
+    if answer != "ok":
+        raise RuntimeError(answer)
+    deadline = time.monotonic() + 9
+    stable = 0
+    snapshot = []
+    while time.monotonic() < deadline:
+        phase = hypr("repl", 'require("system-tools-monitors").status()')
+        snapshot = monitors()
+        if phase.startswith("failed:"):
+            raise RuntimeError(phase)
+        if phase == "ready:" + mode and layout_matches(mode, snapshot, outputs):
+            stable += 1
+            if stable >= 3:
+                return snapshot
+        else:
+            stable = 0
+        time.sleep(0.25)
+    raise RuntimeError("Display state did not settle: " + json.dumps(snapshot))
+
+
+def switch(mode):
+    # Check again after the menu closes: a cable may have changed meanwhile.
+    current = monitors()
+    outputs = resolve_outputs(current)
+    if mode not in ("auto", "laptop") and not outputs["connected"]:
+        notify("No external display connected; layout unchanged.")
+        return 1
+    if not MODULE.is_file():
+        raise RuntimeError(f"Supporting Lua module is missing: {MODULE}; run the installer")
+    capability = hypr("repl", 'type(hl) == "table" and type(hl.monitor) == "function" and '
+                      'type(hl.get_monitors) == "function" and type(hl.timer) == "function"')
+    if capability != "true":
+        raise RuntimeError("Requires an active Hyprland Lua configuration (0.57+); layout unchanged")
+    previous = PATH.read_bytes() if PATH.exists() else None
+    previous_mode = previous.decode().strip() if previous else None
+    if previous_mode not in MODES.values():
+        # On first use, auto may not resemble the user's current layout at all.
+        previous_mode = next((candidate for candidate in MODES.values()
+                              if layout_matches(candidate, current, outputs)), "laptop")
+    try:
+        write_selection((mode + "\n").encode())
+        applied = apply(mode, outputs)
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+        write_selection(previous)
+        try:
+            apply(previous_mode, outputs)
+            recovery = "Previous layout restored."
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+            write_selection(b"laptop\n")
+            try:
+                apply("laptop", outputs)
+                recovery = "Laptop screen restored."
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+                recovery = "Automatic recovery also failed; run display-menu laptop."
+        log = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "display-menu/last-error.log"
+        log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        log.parent.chmod(0o700)
+        log.write_text(str(error) + "\n" + recovery + "\n")
+        log.chmod(0o600)
+        notify("Could not apply display mode. " + recovery)
+        print(error, file=sys.stderr)
+        return 1
+    label = next(label for label, value in MODES.items() if value == mode)
+    if mode not in ("auto", "laptop") and not any(m["name"] == outputs["external"] for m in applied):
+        notify("External display disconnected; primary screen active. Run display-menu again after reconnection.")
+    else:
+        notify(label + " applied and verified.")
+    return 0
+
+
+def main():
+    if sys.argv[1:] in (["--help"], ["-h"]):
+        print(f"""Usage: display-menu [auto|laptop|external|right|left|mirror]
+Requires Hyprland 0.57+ running a Lua configuration, and the installed
+{MODULE} helper. No hypr config import is needed.
+
+Settings (optional): {SETTINGS}
+Example: {{"laptop":"eDP-2", "external":"DP-3", "laptop_scale":2, "external_scale":1}}
+The laptop key names the primary/recovery output (also usable on desktops).
+Without settings: discover exactly one eDP/LVDS/DSI panel and at most one
+physical external connector. Reuse reported scales; use auto when unknown.
+Scale overrides accept auto or numbers 0.5..4. Ambiguous primary selection
+requires settings. More than two outputs, virtual outputs, and nonzero
+rotation/flip transforms are unsupported and leave the layout unchanged.
+
+Uses preferred modes. Stages independent outputs before disabling/mirroring,
+verifies the result, and attempts previous-mode/primary recovery on failure.
+Selection is saved in {PATH}; installation never changes monitor rules.
+Layouts are applied only on invocation: config reloads/hotplug can override
+them. Run display-menu again after reconnecting or reloading Hyprland.
+""")
+        return 0
+    if len(sys.argv) > 2 or (len(sys.argv) == 2 and sys.argv[1] not in MODES.values()):
+        print("Usage: display-menu [auto|laptop|external|right|left|mirror]", file=sys.stderr)
+        return 2
+    if len(sys.argv) == 2:
+        mode = sys.argv[1]
+    else:
+        result = subprocess.run(
+            ["rofi", "-dmenu", "-no-config", "-theme", str(THEME), "-i", "-no-custom", "-p", "Display mode",
+             "-kb-row-down", "Down,Control+n,j", "-kb-row-up", "Up,Control+p,k"],
+            input="\n".join(MODES), capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return 0
+        mode = MODES.get(result.stdout.strip())
+        if mode is None:
+            return 0
+    lock_path = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"display-menu-{os.getuid()}.lock"
+    with lock_path.open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            notify("A display change is already in progress.")
+            return 1
+        return switch(mode)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+        notify(f"Display mode failed: {error}")
+        sys.exit(1)

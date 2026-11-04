@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+    --help|-h)
+        printf 'Usage: clipboard-watch\nWatches Wayland text/images; requires clipboard-stack in the same bin directory.\n'
+        exit 0 ;;
+    "") ;;
+    *) printf 'Usage: clipboard-watch\n' >&2; exit 2 ;;
+esac
+umask 077
+runtime=${XDG_RUNTIME_DIR:-/tmp/clipboard-stack-$UID}
+mkdir -p "$runtime"
+exec 9>"$runtime/clipboard-stack.lock"
+flock -n 9 || exit 0
+script="$(dirname -- "$(readlink -f -- "$0")")/clipboard-stack"
+pids=()
+cleanup() {
+    if ((${#pids[@]})); then
+        kill "${pids[@]}" 2>/dev/null || true
+        wait "${pids[@]}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT HUP
+wl-paste --no-newline --type text --watch "$script" store text 9>&- &
+pids+=("$!")
+wl-paste --no-newline --type image --watch "$script" store image 9>&- &
+pids+=("$!")
+wait -n "${pids[@]}"
