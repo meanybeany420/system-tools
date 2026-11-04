@@ -19,7 +19,9 @@ MODES = {
     "Extend — external on left": "left",
     "Mirror": "mirror",
 }
-CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR") or
+               Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "system-tools/runtime")
 PATH = CONFIG / "hypr/monitor-mode"
 SETTINGS = CONFIG / "hypr/system-tools-displays.json"
 MODULE = CONFIG / "hypr/system-tools-monitors.lua"
@@ -194,7 +196,7 @@ def switch(mode):
                 recovery = "Laptop screen restored."
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
                 recovery = "Automatic recovery also failed; run display-menu laptop."
-        log = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "display-menu/last-error.log"
+        log = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "display-menu/last-error.log"
         log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         log.parent.chmod(0o700)
         log.write_text(str(error) + "\n" + recovery + "\n")
@@ -248,7 +250,10 @@ them. Run display-menu again after reconnecting or reloading Hyprland.
         mode = MODES.get(result.stdout.strip())
         if mode is None:
             return 0
-    lock_path = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"display-menu-{os.getuid()}.lock"
+    RUNTIME.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        RUNTIME.chmod(0o700)
+    lock_path = RUNTIME / f"display-menu-{os.getuid()}.lock"
     with lock_path.open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

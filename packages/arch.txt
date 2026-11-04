@@ -9,6 +9,7 @@ pipewire-audio
 pipewire-pulse
 libnotify
 wl-clipboard
+xdg-utils
 util-linux
 mako
 hyprland

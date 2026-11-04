@@ -8,7 +8,7 @@ import shutil
 import subprocess
 
 COMMANDS = ('bash', 'python3', 'rofi', 'wpctl', 'brightnessctl', 'notify-send',
-            'wl-copy', 'wl-paste', 'flock', 'readlink', 'hyprctl', 'makoctl')
+            'wl-copy', 'wl-paste', 'xdg-mime', 'flock', 'readlink', 'hyprctl', 'makoctl')
 ASSETS = ('rofi/quick-audio.rasi', 'rofi/system-tools.rasi',
           'hypr/system-tools-monitors.lua')
 

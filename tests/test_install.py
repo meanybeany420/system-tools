@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRATCH = Path(os.environ.get('TMPDIR', Path.home() / '.cache'))
+SCRATCH = Path(tempfile.gettempdir())
 
 
 class InstallTests(unittest.TestCase):
@@ -149,12 +149,50 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), 'test-tool')
 
+    @unittest.skipUnless(shutil.which('gio'), 'gio unavailable')
+    def test_gio_launches_installed_fixture_in_percent_home(self):
+        # Only launch the harmless printf fixtures installed from this test checkout.
+        for leaf in ('control-home', 'percent%home', 'spaces \' quote " dollar $ tick ` slash \\ %home'):
+            with self.subTest(home=leaf):
+                self.home = self.base / leaf
+                self.home.mkdir()
+                self.env['HOME'] = str(self.home)
+                self.run_install('--skip-packages')
+                desktop = self.home / '.local/share/applications/system-tools-quick-audio.desktop'
+                result = subprocess.run(
+                    ['gio', 'launch', str(desktop)], env=self.env,
+                    text=True, capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), 'test-tool')
+
     def test_relative_xdg_rejected_before_package_calls(self):
         self.env['XDG_CONFIG_HOME'] = 'relative-config'
         result = self.run_install(ok=False)
         self.assertEqual(result.returncode, 2)
         self.assertFalse(self.calls.exists())
         self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_bash_marker_examples_preserved_during_install_and_update(self):
+        rc = self.home / '.bashrc'
+        prefix = (b'# Example: # >>> system-tools managed PATH >>>\n'
+                  b'export KEEP_ME=yes\n'
+                  b'# End example: # <<< system-tools managed PATH <<<\n')
+        rc.write_bytes(prefix)
+        self.run_install('--skip-packages')
+        first = rc.read_bytes()
+        self.assertTrue(first.startswith(prefix))
+        suffix = b'# Example: # >>> system-tools managed PATH >>>\nexport KEEP_AFTER=yes'
+        rc.write_bytes(first + suffix)
+        self.env['XDG_CONFIG_HOME'] = str(self.base / 'new-config')
+        self.run_install('--skip-packages')
+        updated = rc.read_bytes()
+        self.assertTrue(updated.startswith(prefix))
+        self.assertTrue(updated.endswith(suffix))
+        self.assertIn(str(self.base / 'new-config/system-tools/path.bash').encode(), updated)
+        before = {str(p): p.lstat().st_mtime_ns for p in self.home.rglob('*')}
+        self.run_install('--skip-packages')
+        self.assertEqual(rc.read_bytes(), updated)
+        self.assertEqual(before, {str(p): p.lstat().st_mtime_ns for p in self.home.rglob('*')})
 
     def test_changed_xdg_updates_managed_bash_block(self):
         self.run_install('--skip-packages')
@@ -218,13 +256,30 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(list(self.home.iterdir()), [])
 
     def test_malformed_bash_block_does_not_partially_deploy(self):
-        rc = self.home / '.bashrc'
-        rc.write_text('# >>> system-tools managed PATH >>>\n# incomplete user edit\n')
-        original = rc.read_bytes()
-        result = self.run_install('--skip-packages', ok=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(rc.read_bytes(), original)
-        self.assertEqual(list(self.home.iterdir()), [rc])
+        start = '# >>> system-tools managed PATH >>>\n'
+        end = '# <<< system-tools managed PATH <<<\n'
+        cases = {
+            'unmatched-start': start + '# incomplete user edit\n',
+            'unmatched-end': end.rstrip('\n'),
+            'duplicate-start': start + start + end,
+            'duplicate-end': start + end + end,
+            'duplicate-block': start + end + start + end,
+            'reversed': end + 'export KEEP_ME=yes\n' + start,
+        }
+        for name, content in cases.items():
+            with self.subTest(markers=name):
+                self.home = self.base / name
+                self.home.mkdir()
+                self.env['HOME'] = str(self.home)
+                rc = self.home / '.bashrc'
+                original = content.encode()
+                rc.write_bytes(original)
+                result = self.run_install('--skip-packages', ok=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('managed PATH markers', result.stderr)
+                self.assertEqual(rc.read_bytes(), original)
+                self.assertEqual(list(self.home.iterdir()), [rc])
+                self.assertFalse(self.calls.exists())
 
     def test_dry_run_no_writes_or_package_calls(self):
         before = list(self.home.rglob('*'))

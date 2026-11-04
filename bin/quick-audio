@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 SINK = "@DEFAULT_AUDIO_SINK@"
-THEME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rofi/quick-audio.rasi"
+THEME = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "rofi/quick-audio.rasi"
 
 
 def audio(*args):

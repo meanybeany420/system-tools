@@ -8,8 +8,9 @@ case "${1:-}" in
     *) printf 'Usage: clipboard-watch\n' >&2; exit 2 ;;
 esac
 umask 077
-runtime=${XDG_RUNTIME_DIR:-/tmp/clipboard-stack-$UID}
+runtime=${XDG_RUNTIME_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/system-tools/runtime}
 mkdir -p "$runtime"
+if [[ -z ${XDG_RUNTIME_DIR:-} ]]; then chmod 700 "$runtime"; fi
 exec 9>"$runtime/clipboard-stack.lock"
 flock -n 9 || exit 0
 script="$(dirname -- "$(readlink -f -- "$0")")/clipboard-stack"

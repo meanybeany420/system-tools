@@ -20,6 +20,12 @@ def load_doctor():
 
 
 class DoctorTests(unittest.TestCase):
+    def test_image_clipboard_mime_inference_dependency_is_declared(self):
+        module = load_doctor()
+        packages = (ROOT / 'packages/arch.txt').read_text().splitlines()
+        self.assertIn('xdg-utils', packages)
+        self.assertIn('xdg-mime', module.COMMANDS)
+
     def test_missing_dependencies_are_reported_without_running_commands(self):
         module = load_doctor()
         with tempfile.TemporaryDirectory() as directory:

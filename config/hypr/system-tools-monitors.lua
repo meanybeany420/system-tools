@@ -1,4 +1,4 @@
--- Adapted from bill's monitors.lua: stage modesets across rendered frames.
+-- Staged monitor transitions across rendered frames.
 -- Hyprland Lua API (0.57+). Loading this module changes no monitor rules.
 -- Only display-menu calls apply(); no config import or perpetual enforcement.
 local valid = { auto=true, laptop=true, external=true, right=true, left=true, mirror=true }

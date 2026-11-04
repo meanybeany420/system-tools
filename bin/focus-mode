@@ -15,11 +15,13 @@ import time
 
 DURATIONS = {"20 mins": 20, "30 mins": 30, "45 mins": 45,
              "1 hr": 60, "1 hr 30 mins": 90, "2 hr": 120}
-ROOT = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/focus-mode-{os.getuid()}")) / "focus-mode"
+RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR") or
+               Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "system-tools/runtime")
+ROOT = RUNTIME / "focus-mode"
 STATE = ROOT / "session.json"
 QUIET = "focus-timer"
 
-THEME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rofi/system-tools.rasi"
+THEME = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "rofi/system-tools.rasi"
 
 
 def command(*args):
@@ -31,6 +33,9 @@ def command(*args):
 
 @contextmanager
 def locked():
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        RUNTIME.mkdir(parents=True, exist_ok=True, mode=0o700)
+        RUNTIME.chmod(0o700)
     ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     ROOT.chmod(0o700)
     with (ROOT / "lock").open("a") as lock:

@@ -35,7 +35,8 @@ def desktop_exec(path):
     value = str(path).replace('%', '%%')
     for character in ('\\', '"', '`', '$'):
         value = value.replace(character, '\\' + character)
-    return desktop_value('"' + value + '"')
+    # Keep field codes out of the executable token: GIO rejects %% there.
+    return '/usr/bin/env ' + desktop_value('"' + value + '"')
 
 
 def safe_parents(path):
@@ -142,15 +143,21 @@ def install():
     rc = home / '.bashrc'
     existing = rc.read_bytes() if rc.exists() else b''
     block = f'{START}\nif [ -r {shlex.quote(str(snippet))} ]; then\n    . {shlex.quote(str(snippet))}\nfi\n{END}\n'.encode()
-    if START.encode() in existing or END.encode() in existing:
-        if existing.count(START.encode()) != 1 or existing.count(END.encode()) != 1:
+    markers = {START.encode(): [], END.encode(): []}
+    offset = 0
+    for line in existing.splitlines(keepends=True):
+        marker = line.rstrip(b'\r\n')
+        if marker in markers:
+            markers[marker].append((offset, offset + len(line)))
+        offset += len(line)
+    starts, ends = markers[START.encode()], markers[END.encode()]
+    if starts or ends:
+        if len(starts) != 1 or len(ends) != 1:
             raise ValueError('Ambiguous managed PATH markers in .bashrc; repair them manually.')
-        start = existing.index(START.encode())
-        end = existing.index(END.encode()) + len(END.encode())
-        if start >= end:
+        start = starts[0][0]
+        end = ends[0][1]
+        if start >= ends[0][0]:
             raise ValueError('Reversed managed PATH markers in .bashrc.')
-        if existing[end:end + 1] == b'\n':
-            end += 1
         updated = existing[:start] + block + existing[end:]
     else:
         updated = existing + (b'\n' if existing and not existing.endswith(b'\n') else b'') + block

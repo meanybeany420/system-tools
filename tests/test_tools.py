@@ -407,7 +407,7 @@ print("Lua staged transitions and bounded failure passed")
                 store.assert_not_called()
         self.assertTrue(str(clipboard.DB).startswith(str(self.home)))
 
-    def test_clipboard_watch_uses_sibling_binary_and_reaps_watchers(self):
+    def check_clipboard_watcher(self):
         fakebin = self.home / 'fakebin'
         fakebin.mkdir()
         paste = fakebin / 'wl-paste'
@@ -424,6 +424,16 @@ print("Lua staged transitions and bounded failure passed")
             args = json.loads((self.home / ('watch-' + kind)).read_text())
             index = args.index('--watch')
             self.assertEqual(args[index+1:], [str(REPO / 'bin/clipboard-stack'), 'store', kind])
+
+    def test_clipboard_watch_uses_sibling_binary_and_reaps_watchers(self):
+        self.check_clipboard_watcher()
+
+    def test_clipboard_watch_without_runtime_uses_private_home_fallback(self):
+        with patch.dict(os.environ, {'XDG_RUNTIME_DIR': ''}):
+            self.check_clipboard_watcher()
+        private = self.home / 'state/system-tools/runtime'
+        self.assertEqual(private.stat().st_mode & 0o777, 0o700)
+        self.assertTrue((private / 'clipboard-stack.lock').exists())
 
     def test_private_data_permissions_do_not_change_shared_directories(self):
         old = os.umask(0o022)
@@ -452,6 +462,25 @@ print("Lua staged transitions and bounded failure passed")
         log = self.home / 'state/display-menu/last-error.log'
         self.assertEqual(log.parent.stat().st_mode & 0o777, 0o700)
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
+    def test_empty_xdg_variables_use_home_defaults(self):
+        empty = {name: '' for name in ('XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR')}
+        with patch.dict(os.environ, empty):
+            for name in ('quick-audio', 'quick-brightness', 'focus-mode', 'display-menu', 'clipboard-stack'):
+                module = self.load(name)
+                expected = 'quick-audio.rasi' if name.startswith('quick-') else 'system-tools.rasi'
+                self.assertEqual(module.THEME, self.home / '.config/rofi' / expected, name)
+            clipboard = self.load('clipboard-stack')
+            self.assertEqual(clipboard.DB, self.home / '.cache/clipboard-stack/history.sqlite3')
+            focus = self.load('focus-mode')
+            self.assertEqual(focus.ROOT, self.home / '.local/state/system-tools/runtime/focus-mode')
+            with focus.locked():
+                self.assertEqual(focus.RUNTIME.stat().st_mode & 0o777, 0o700)
+            display = self.load('display-menu')
+            self.assertEqual(display.RUNTIME, self.home / '.local/state/system-tools/runtime')
+            with patch.object(display.sys, 'argv', ['display-menu', 'laptop']), patch.object(display, 'switch', return_value=0) as switch:
+                self.assertEqual(display.main(), 0)
+                switch.assert_called_once_with('laptop')
 
     def test_numeric_quick_modes_do_not_open_rofi(self):
         for name, command in [('quick-audio', 'wpctl'), ('quick-brightness', 'brightnessctl')]:

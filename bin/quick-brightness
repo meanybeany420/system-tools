@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-THEME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rofi/quick-audio.rasi"
+THEME = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "rofi/quick-audio.rasi"
 
 
 def brightness(*args):

@@ -8,8 +8,8 @@ import sqlite3
 import subprocess
 import sys
 
-DB = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "clipboard-stack/history.sqlite3"
-THEME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rofi/system-tools.rasi"
+DB = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "clipboard-stack/history.sqlite3"
+THEME = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "rofi/system-tools.rasi"
 
 
 @contextmanager

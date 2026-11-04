@@ -18,7 +18,7 @@ Use `--help` on a command for its options. These are Linux desktop tools, not cr
 
 ## Install
 
-Run the installer as your normal user, not with `sudo`:
+Run the installer as your normal user, not with `sudo`. The package phase requires pacman and configured sudo access:
 
 ```sh
 ./install.sh --dry-run
@@ -57,10 +57,25 @@ The audio and brightness prompts include their own minimal theme. Other menus us
 - Run the graphical tools inside a working Wayland/Hyprland session. Installing Hyprland does not switch your current session.
 - Audio requires a running PipeWire/WirePlumber stack and a usable default output. Existing audio packages may conflict with the installer package list; do not accept removals without reviewing them.
 - Brightness currently targets a supported backlight. External-monitor DDC/CI brightness is not implemented. Device permissions must permit brightness control; the scripts do not silently elevate privileges.
-- Display layouts are hardware-dependent. Check `display-menu --help` on a new machine and resolve ambiguous display selection before applying a layout. The included monitor module is separate from your own `monitors.lua`.
+- Display layouts require Hyprland 0.57+ running a Lua configuration. No module import into your existing Hyprland configuration is needed. The module applies a layout only when invoked; rerun `display-menu` after hotplug or a compositor configuration reload. The default discovery supports one internal panel and at most one physical external output. Desktop primary selection requires explicit settings. More than two, virtual, rotated or flipped outputs are rejected before applying a layout.
+
+  Optional settings: `${XDG_CONFIG_HOME:-$HOME/.config}/hypr/system-tools-displays.json`
+
+  ```json
+  {"laptop":"eDP-2","external":"DP-3","laptop_scale":2,"external_scale":1}
+  ```
+
+  Replace those example connector names with your own. `laptop` means the primary/recovery output, including on a desktop. Scale values accept `"auto"` or numbers from 0.5 to 4. Without overrides, the helper reuses reported scales. Use `display-menu --help` for details.
 - Clipboard recording is opt-in. Run `clipboard-watch` when you want recording; `clipboard-stack` opens the history menu. Do not start duplicate watchers through several startup mechanisms.
 - Clipboard history is private local runtime data, not part of this repository. Treat it as sensitive even though it is stored locally.
-- Focus mode can be used from Bash. The `--status` and `--watch` outputs are available for optional Waybar integration. Notification silencing requires a compatible notification-daemon configuration; installing a package is not the same as configuring your existing daemon.
+- Focus mode can be used from Bash: `focus-mode 20` starts a 20-minute session, and `focus-mode stop` ends it. A detached completion worker runs without Waybar. The `--status` and `--watch` outputs remain available for optional Waybar integration. To silence notifications with mako, add the following rule to its configuration and reload mako yourself:
+
+  ```ini
+  [mode=focus-timer]
+  invisible=1
+  ```
+
+  The installer does not replace notification-daemon configuration. Timer completion still works without mako or Waybar.
 
 ## Repository layout
 

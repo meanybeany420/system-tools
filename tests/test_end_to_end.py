@@ -40,7 +40,7 @@ class InstalledToolsTests(unittest.TestCase):
         self.fake = self.base / 'FAKE-desktop-commands'
         self.fake.mkdir()
         for name in ('rofi', 'wpctl', 'brightnessctl', 'notify-send', 'wl-copy', 'wl-paste',
-                     'flock', 'readlink', 'hyprctl', 'makoctl'):
+                     'xdg-mime', 'flock', 'readlink', 'hyprctl', 'makoctl'):
             path = self.fake / name
             path.write_text('#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$HOME/FAKE-command-calls"\n')
             path.chmod(0o755)
