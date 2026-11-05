@@ -18,6 +18,13 @@ Use `--help` on a command for its options. These are Linux desktop tools, not cr
 
 ## Install
 
+Clone the repository and enter its directory first:
+
+```sh
+git clone https://github.com/meanybeany420/system-tools.git
+cd system-tools
+```
+
 Run the installer as your normal user, not with `sudo`. The package phase requires pacman and configured sudo access:
 
 ```sh
